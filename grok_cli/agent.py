@@ -4,6 +4,8 @@ from langchain_openai import ChatOpenAI
 from langchain.memory import ConversationBufferMemory
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from composio_langchain import ComposioToolSet, App
+import os
+from pathlib import Path
 
 class GrokAgent:
     def __init__(self, api_key, model="grok-4-0709", base_url="https://api.x.ai/v1"):
@@ -15,8 +17,11 @@ class GrokAgent:
             max_tokens=1000
         )
         
+        # Set working directory restriction
+        self.working_dir = Path(os.getcwd()).resolve()
+        
         self.composio_toolset = ComposioToolSet()
-        self.tools = self.composio_toolset.get_tools(apps=[App.FILETOOL])
+        self.tools = self._get_restricted_tools()
         
         prompt = ChatPromptTemplate.from_messages([
             ("system", "You are a helpful AI assistant with access to file tools. Use the tools when needed to help the user."),
@@ -38,6 +43,46 @@ class GrokAgent:
             verbose=False,  
             max_iterations=10
         )
+    
+    def _is_path_allowed(self, file_path):
+        """Check if file path is within working directory"""
+        try:
+            resolved_path = Path(file_path).resolve()
+            return resolved_path.is_relative_to(self.working_dir)
+        except (ValueError, OSError):
+            return False
+    
+    def _get_restricted_tools(self):
+        """Get file tools with working directory restrictions"""
+        original_tools = self.composio_toolset.get_tools(apps=[App.FILETOOL])
+        
+        # Wrap tools with path validation
+        restricted_tools = []
+        for tool in original_tools:
+            restricted_tools.append(self._wrap_tool_with_validation(tool))
+        
+        return restricted_tools
+    
+    def _wrap_tool_with_validation(self, tool):
+        """Wrap a tool to validate file paths"""
+        original_func = tool.func
+        
+        def validated_func(*args, **kwargs):
+            # Check for file path arguments and validate them
+            for arg in args:
+                if isinstance(arg, str) and ('/' in arg or '\\' in arg):
+                    if not self._is_path_allowed(arg):
+                        return f"Error: Access denied. File operations are restricted to the working directory: {self.working_dir}"
+            
+            for value in kwargs.values():
+                if isinstance(value, str) and ('/' in value or '\\' in value):
+                    if not self._is_path_allowed(value):
+                        return f"Error: Access denied. File operations are restricted to the working directory: {self.working_dir}"
+            
+            return original_func(*args, **kwargs)
+        
+        tool.func = validated_func
+        return tool
     
     def chat(self, user_message):
         """Chat with the agent using LangChain's built-in tool calling"""
